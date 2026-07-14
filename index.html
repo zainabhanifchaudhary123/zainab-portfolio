@@ -1409,6 +1409,25 @@
             font-size: 3rem;
             border-radius: 1rem;
         }
+
+        /* =============================================
+                   FIREBASE STATUS BANNER
+                   ============================================= */
+        .fb-status-banner {
+            max-width: 600px;
+            margin: 0 auto 1.5rem;
+            background: rgba(251, 113, 133, 0.1);
+            border: 1px solid var(--accent-rose);
+            color: var(--text-secondary);
+            border-radius: 1rem;
+            padding: 0.9rem 1.2rem;
+            font-size: 0.85rem;
+            text-align: center;
+            display: none;
+        }
+        .fb-status-banner.show {
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -1647,6 +1666,9 @@
                 <h2 class="section-title">What People Say</h2>
                 <p class="section-sub">Kind words from colleagues and mentors</p>
             </div>
+
+            <div class="fb-status-banner" id="fbStatusBanner"></div>
+
             <div class="testimonials-carousel" id="testimonialsCarousel"></div>
 
             <div class="review-form-wrap reveal-scale">
@@ -1753,6 +1775,73 @@
             <div id="modalBody"></div>
         </div>
     </div>
+
+    <!-- =============================================
+    FIREBASE SDK (Firestore) — for cross-visitor testimonials
+    ============================================= -->
+    <script type="module">
+        // Import the functions you need from the SDKs you need
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+        import {
+            getFirestore,
+            collection,
+            addDoc,
+            deleteDoc,
+            doc,
+            onSnapshot,
+            query,
+            orderBy,
+            serverTimestamp
+        } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+        // =====================================================
+        // ⚠️ REPLACE THIS WITH YOUR OWN FIREBASE CONFIG ⚠️
+        // Get this from: Firebase Console → Project Settings → General
+        // → Your apps → SDK setup and configuration
+        // =====================================================
+        const firebaseConfig = {
+            apiKey: "AIzaSyB1RbTxs0JW0vzy0bjWqblr3P2OFumWkqw",
+            authDomain: "zainab-portfolio-38256.firebaseapp.com",
+            projectId: "zainab-portfolio-38256",
+            storageBucket: "zainab-portfolio-38256.firebasestorage.app",
+            messagingSenderId: "237553704865",
+            appId: "1:237553704865:web:223ad137b58feab197f5e0",
+            measurementId: "G-40ZK9WM8JD"
+        };
+
+        let db = null;
+        let firebaseReady = false;
+
+        try {
+            // If config still has placeholder values, don't even try to init
+            if (firebaseConfig.apiKey && firebaseConfig.apiKey !== "YOUR_API_KEY") {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                firebaseReady = true;
+            }
+        } catch (err) {
+            console.error("Firebase init failed:", err);
+        }
+
+        // Expose what the rest of the page's plain <script> needs,
+        // via a small bridge on window.
+        window.__firebaseBridge = {
+            ready: firebaseReady,
+            db,
+            collection,
+            addDoc,
+            deleteDoc,
+            doc,
+            onSnapshot,
+            query,
+            orderBy,
+            serverTimestamp
+        };
+
+        // Fire a custom event so the main script (which loads separately)
+        // knows Firebase is ready to use.
+        window.dispatchEvent(new CustomEvent('firebaseBridgeReady'));
+    </script>
 
     <!-- =============================================
     JAVASCRIPT — All interactive logic
@@ -1985,8 +2074,14 @@
                 if (e.key === 'Escape') closeModal();
             });
 
-            // -------- TESTIMONIALS --------
-            const STORAGE_KEY = 'zh_visitor_testimonials';
+            // =====================================================
+            // -------- TESTIMONIALS (Firebase Firestore powered) --------
+            // Reviews are now stored in a shared Firestore database
+            // so EVERY visitor sees EVERY review, not just their own.
+            // Falls back to localStorage (device-only) if Firebase
+            // config hasn't been filled in yet.
+            // =====================================================
+            const LOCAL_FALLBACK_KEY = 'zh_visitor_testimonials';
             const avatarPool = ['🙂', '🧑', '👩', '👨', '🧑‍💼', '👩‍💼', '👨‍💼', '🧑‍🎓', '👩‍🎓', '👨‍🎓'];
 
             function escapeHtml(str) {
@@ -1995,34 +2090,19 @@
                 return div.innerHTML;
             }
 
-            // Default testimonials removed — only visitor-submitted reviews are shown now
-            const defaultTestimonials = [];
-
-            // Visitor-submitted testimonials, loaded from this browser's storage
-            function loadVisitorTestimonials() {
-                try {
-                    const raw = localStorage.getItem(STORAGE_KEY);
-                    return raw ? JSON.parse(raw) : [];
-                } catch (err) {
-                    return [];
-                }
-            }
-
-            function saveVisitorTestimonials(list) {
-                try {
-                    localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-                } catch (err) {
-                    console.error('Could not save review:', err);
-                }
-            }
-
             const carousel = document.getElementById('testimonialsCarousel');
+            const fbStatusBanner = document.getElementById('fbStatusBanner');
+            const reviewForm = document.getElementById('reviewForm');
+            const reviewFormMsg = document.getElementById('reviewFormMsg');
 
-            function renderTestimonials() {
+            let fb = null; // bridge object once ready
+            let usingFirebase = false;
+            let localCache = []; // used only in fallback mode
+
+            function renderTestimonialList(list) {
                 carousel.innerHTML = '';
-                const visitorTestimonials = loadVisitorTestimonials();
 
-                if (visitorTestimonials.length === 0) {
+                if (!list || list.length === 0) {
                     carousel.innerHTML = `
                         <div style="flex:1; text-align:center; padding:2rem; color:var(--text-muted);">
                             <i class="fas fa-comment-dots" style="font-size:2rem; margin-bottom:0.8rem; display:block;"></i>
@@ -2032,7 +2112,7 @@
                     return;
                 }
 
-                visitorTestimonials.forEach(t => {
+                list.forEach(t => {
                     const div = document.createElement('div');
                     div.className = 'testimonial-item user-submitted';
                     div.innerHTML = `
@@ -2049,21 +2129,100 @@
                 });
 
                 carousel.querySelectorAll('.delete-review-btn').forEach(btn => {
-                    btn.addEventListener('click', function() {
+                    btn.addEventListener('click', async function() {
                         const id = this.dataset.id;
                         if (!confirm('Delete this review? This cannot be undone.')) return;
-                        const remaining = loadVisitorTestimonials().filter(rev => String(rev.id) !== String(id));
-                        saveVisitorTestimonials(remaining);
-                        renderTestimonials();
+
+                        if (usingFirebase) {
+                            try {
+                                await fb.deleteDoc(fb.doc(fb.db, 'testimonials', id));
+                                // onSnapshot listener will auto re-render
+                            } catch (err) {
+                                console.error('Delete failed:', err);
+                                alert('Could not delete review. Please try again.');
+                            }
+                        } else {
+                            localCache = localCache.filter(rev => String(rev.id) !== String(id));
+                            localStorage.setItem(LOCAL_FALLBACK_KEY, JSON.stringify(localCache));
+                            renderTestimonialList(localCache);
+                        }
                     });
                 });
             }
-            renderTestimonials();
+
+            function loadLocalFallback() {
+                try {
+                    const raw = localStorage.getItem(LOCAL_FALLBACK_KEY);
+                    localCache = raw ? JSON.parse(raw) : [];
+                } catch (err) {
+                    localCache = [];
+                }
+                renderTestimonialList(localCache);
+            }
+
+            function showFbBanner(msg) {
+                fbStatusBanner.textContent = msg;
+                fbStatusBanner.classList.add('show');
+            }
+
+            function initTestimonials() {
+                if (window.__firebaseBridge && window.__firebaseBridge.ready) {
+                    fb = window.__firebaseBridge;
+                    usingFirebase = true;
+
+                    try {
+                        const q = fb.query(
+                            fb.collection(fb.db, 'testimonials'),
+                            fb.orderBy('createdAt', 'asc')
+                        );
+                        fb.onSnapshot(q, (snapshot) => {
+                            const list = [];
+                            snapshot.forEach(docSnap => {
+                                const data = docSnap.data();
+                                list.push({
+                                    id: docSnap.id,
+                                    name: data.name,
+                                    role: data.role,
+                                    quote: data.quote,
+                                    img: data.img || '🙂'
+                                });
+                            });
+                            renderTestimonialList(list);
+                        }, (err) => {
+                            console.error('Firestore listen failed:', err);
+                            showFbBanner('Live reviews are temporarily unavailable. Showing reviews saved on this device only.');
+                            usingFirebase = false;
+                            loadLocalFallback();
+                        });
+                    } catch (err) {
+                        console.error('Firestore query failed:', err);
+                        usingFirebase = false;
+                        loadLocalFallback();
+                    }
+                } else {
+                    // Firebase config not filled in yet — fall back so the site still works
+                    showFbBanner('Reviews are currently only visible on this device. Firebase setup is pending — see setup notes.');
+                    usingFirebase = false;
+                    loadLocalFallback();
+                }
+            }
+
+            // Wait for the Firebase bridge module script to finish (or time out)
+            let bridgeSettled = false;
+            window.addEventListener('firebaseBridgeReady', () => {
+                if (bridgeSettled) return;
+                bridgeSettled = true;
+                initTestimonials();
+            });
+            // Fallback timeout in case the module script fails/never fires
+            setTimeout(() => {
+                if (bridgeSettled) return;
+                bridgeSettled = true;
+                initTestimonials();
+            }, 1500);
 
             // -------- REVIEW SUBMISSION FORM --------
-            const reviewForm = document.getElementById('reviewForm');
-            const reviewFormMsg = document.getElementById('reviewFormMsg');
-            reviewForm.addEventListener('submit', function(e) {
+            reviewForm.addEventListener('submit', async function(e) {
                 e.preventDefault();
                 const name = document.getElementById('rname').value.trim();
                 const role = document.getElementById('rrole').value.trim();
@@ -2075,25 +2234,43 @@
                     return;
                 }
 
-                const visitorTestimonials = loadVisitorTestimonials();
-                visitorTestimonials.push({
-                    id: Date.now().toString() + '-' + Math.floor(Math.random() * 10000),
+                const newReview = {
                     name: name,
                     role: role,
                     quote: quote,
                     img: avatarPool[Math.floor(Math.random() * avatarPool.length)]
-                });
-                saveVisitorTestimonials(visitorTestimonials);
-                renderTestimonials();
+                };
 
-                reviewFormMsg.textContent = 'Thanks! Your review has been posted below.';
-                reviewFormMsg.className = 'review-form-msg success';
-                reviewForm.reset();
+                if (usingFirebase) {
+                    try {
+                        await fb.addDoc(fb.collection(fb.db, 'testimonials'), {
+                            ...newReview,
+                            createdAt: fb.serverTimestamp()
+                        });
+                        reviewFormMsg.textContent = 'Thanks! Your review has been posted for everyone to see.';
+                        reviewFormMsg.className = 'review-form-msg success';
+                        reviewForm.reset();
+                        setTimeout(() => {
+                            carousel.scrollLeft = carousel.scrollWidth;
+                        }, 300);
+                    } catch (err) {
+                        console.error('Submit failed:', err);
+                        reviewFormMsg.textContent = 'Could not submit review. Please try again.';
+                        reviewFormMsg.className = 'review-form-msg error';
+                    }
+                } else {
+                    newReview.id = Date.now().toString() + '-' + Math.floor(Math.random() * 10000);
+                    localCache.push(newReview);
+                    localStorage.setItem(LOCAL_FALLBACK_KEY, JSON.stringify(localCache));
+                    renderTestimonialList(localCache);
 
-                // Scroll the new review into view at the end of the carousel
-                setTimeout(() => {
-                    carousel.scrollLeft = carousel.scrollWidth;
-                }, 100);
+                    reviewFormMsg.textContent = 'Thanks! Your review has been posted below (visible on this device only — see setup notes).';
+                    reviewFormMsg.className = 'review-form-msg success';
+                    reviewForm.reset();
+                    setTimeout(() => {
+                        carousel.scrollLeft = carousel.scrollWidth;
+                    }, 100);
+                }
             });
 
             // Auto-scroll carousel
